@@ -1,139 +1,166 @@
 // gps-proxy.js
+// Simple proxy for GPS51 "lastposition" + a couple of helper endpoints.
+// - Reads secrets from environment variables (GPS51_TOKEN, GPS51_BASE, DEFAULT_DEVICE)
+// - Returns JSON when upstream returns JSON; otherwise returns raw text.
+// - Logs helpful debug lines.
+
 const express = require('express');
-const fetch = require('node-fetch'); // v2
+const fetch = require('node-fetch'); // v2 (install node-fetch@2)
 const app = express();
 
-app.use(express.json()); // parse application/json
+app.use(express.json({ limit: '1mb' })); // parse application/json
 
-// Simple CORS - allow local testing from browser
+// Simple CORS (adjust for production)
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*'); // adjust for production
+  res.setHeader('Access-Control-Allow-Origin', '*'); // change to your domain in production
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
-// Config - put your token & default device id here
-const DEFAULT_TOKEN = '6d4e5b472c71bdea160570b14cd48342'; // replace if needed
-const DEFAULT_DEVICE = '865167048531801'; // replace if needed
-const BASE = 'https://gps51.com/webapi';
+// Config via env
+const GPS51_TOKEN = process.env.GPS51_TOKEN || process.env.BASE_TOKEN || '';
+const DEFAULT_DEVICE = process.env.DEFAULT_DEVICE || '865167048531801';
+const GPS51_BASE = process.env.GPS51_BASE || 'https://gps51.com/webapi';
+const DEFAULT_SERVERID = process.env.SERVER_ID || '0';
+const PORT = process.env.PORT || 3000;
 
-// Helper to fetch and return JSON (or raw text)
-async function fetchJson(url, options = {}) {
+// small helper to log
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
+
+// fetch helper that returns { ok, json?, raw?, status, contentType, error? }
+async function fetchText(url, options = {}) {
   try {
     const r = await fetch(url, options);
-    const cType = (r.headers.get('content-type') || '').toLowerCase();
+    const contentType = (r.headers.get('content-type') || '').toLowerCase();
     const text = await r.text();
-    // try parse as JSON when content-type says JSON or when text looks like JSON
-    if (cType.includes('application/json') || text.trim().startsWith('{') || text.trim().startsWith('[')) {
+    if (contentType.includes('application/json') || text.trim().startsWith('{') || text.trim().startsWith('[')) {
       try {
         const json = JSON.parse(text);
-        return { ok: true, json, raw: text, status: r.status, contentType: cType };
-      } catch (e) {
-        // fell through to raw
-        return { ok: false, raw: text, status: r.status, contentType: cType, parseError: e.message };
+        return { ok: true, json, raw: text, status: r.status, contentType };
+      } catch (err) {
+        // parse failed
+        return { ok: false, raw: text, status: r.status, contentType, parseError: err.message };
       }
     }
-    return { ok: false, raw: text, status: r.status, contentType: cType };
+    return { ok: false, raw: text, status: r.status, contentType };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
   }
 }
 
 /**
- * GET /api/poibatch
- * Proxy to GPS51 POI batch endpoint (GET)
+ * GET /api/poibatch - example GET proxy
  */
 app.get('/api/poibatch', async (req, res) => {
   try {
-    // Use query token override if provided in request; else default
-    const token = req.query.token || DEFAULT_TOKEN;
-    const serverid = req.query.serverid || '0';
+    const token = req.query.token || GPS51_TOKEN;
+    const serverid = req.query.serverid || DEFAULT_SERVERID;
     const extend = req.query.extend || 'self';
 
-    const url = `${BASE}?action=poibatch&token=${encodeURIComponent(token)}&extend=${encodeURIComponent(extend)}&serverid=${encodeURIComponent(serverid)}`;
-
-    console.log('Sending to GPS51:', url);
-    const result = await fetchJson(url, { method: 'GET' });
-
-    if (result.ok && result.json) {
-      return res.json(result.json);
+    if (!token) {
+      return res.status(400).json({ error: 'Missing token. Set GPS51_TOKEN env or pass ?token=' });
     }
-    // return raw text as fallback
-    res.status(result.status || 200).type('text/plain').send(result.raw || result.error || 'Unknown error');
+
+    // GPS51 expects query string parameters, example: ?action=poibatch&token=...
+    const url = `${GPS51_BASE}?action=poibatch&token=${encodeURIComponent(token)}&extend=${encodeURIComponent(extend)}&serverid=${encodeURIComponent(serverid)}`;
+    log('GET -> GPS51', url);
+    const result = await fetchText(url, { method: 'GET' });
+
+    if (result.ok && result.json) return res.json(result.json);
+    // fallback to text
+    return res.status(result.status || 200).type('text/plain').send(result.raw || result.error || 'Unknown');
   } catch (err) {
-    console.error('poibatch error:', err);
+    log('poibatch error', err);
     res.status(500).json({ error: err.message || String(err) });
   }
 });
 
 /**
  * POST /api/lastposition
- * Proxy to GPS51 lastposition endpoint. We force streamtype=json so we get JSON response.
- *
- * Request body should be JSON, e.g.
- * {
- *   "username": "UP32PM6481",
- *   "deviceids": ["865167048531801"],
- *   "lastquerypositiontime": 1765102000000
- * }
- *
- * Or you can send without body; proxy will send default device id.
+ * - Accepts JSON body like { deviceids: ["id1","id2"], username: "...", lastquerypositiontime: 176... }
+ * - Falls back to DEFAULT_DEVICE if no body provided.
+ * - Returns JSON when possible.
  */
 app.post('/api/lastposition', async (req, res) => {
   try {
-    const token = req.query.token || DEFAULT_TOKEN;
-    const serverid = req.query.serverid || '0';
+    const token = req.query.token || GPS51_TOKEN;
+    const serverid = req.query.serverid || DEFAULT_SERVERID;
     const extend = req.query.extend || 'self';
 
-    // Prepare payload: use provided body or fallback to default device
-    const payload = (req.body && Object.keys(req.body).length) ? req.body : {
-      username: 'proxy',
-      deviceids: [DEFAULT_DEVICE],
-    };
+    if (!token) {
+      return res.status(400).json({ error: 'Missing token. Set GPS51_TOKEN env or pass ?token=' });
+    }
 
-    const url = `${BASE}?action=lastposition&streamtype=json&token=${encodeURIComponent(token)}&extend=${encodeURIComponent(extend)}&serverid=${encodeURIComponent(serverid)}`;
+    // Use provided body if any, else default payload
+    const incoming = (req.body && Object.keys(req.body).length) ? req.body : null;
+    const payload = incoming || { username: 'proxy', deviceids: [DEFAULT_DEVICE] };
 
-    console.log('Sending to GPS51:', url);
-    console.log(' Body:', JSON.stringify(payload));
+    // Build URL with action + streamtype=json (we force JSON when possible)
+    const url = `${GPS51_BASE}?action=lastposition&streamtype=json&token=${encodeURIComponent(token)}&extend=${encodeURIComponent(extend)}&serverid=${encodeURIComponent(serverid)}`;
+
+    log('POST -> GPS51', url);
+    log('POST body:', JSON.stringify(payload));
 
     const r = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-        // optionally set Referer/User-Agent if needed
-        //'Referer': 'https://gps51.com/',
       },
       body: JSON.stringify(payload),
+      // optionally set timeout using AbortController in advanced deployments
     });
 
     const contentType = (r.headers.get('content-type') || '').toLowerCase();
     const text = await r.text();
 
-    // If JSON, parse and return as JSON
+    // Try to parse JSON if possible
     if (contentType.includes('application/json') || text.trim().startsWith('{') || text.trim().startsWith('[')) {
       try {
         const json = JSON.parse(text);
-        console.log('GPS51 response JSON:', json);
+        // Optionally augment result with metadata for debugging (not sensitive)
+        const meta = {
+          _proxy: {
+            requestedDeviceIds: Array.isArray(payload.deviceids) ? payload.deviceids : [payload.deviceids],
+            serverid,
+            extend,
+            upstreamStatus: r.status,
+          }
+        };
+        // if upstream is JSON object, merge meta under _proxy
+        if (typeof json === 'object' && json !== null) {
+          json._proxy = meta._proxy;
+        }
+        log('GPS51 returned JSON, records count:', (json && json.records && json.records.length) || 0);
         return res.json(json);
       } catch (e) {
-        // fallback
-        console.warn('Failed parsing JSON from GPS51:', e.message);
+        log('Failed parse JSON from GPS51:', e.message);
         return res.status(200).type('text/plain').send(text);
       }
     }
 
     // fallback: return raw text
     res.status(r.status || 200).type('text/plain').send(text);
+
   } catch (err) {
-    console.error('lastposition error:', err);
+    log('lastposition error', err);
     res.status(500).json({ error: err.message || String(err) });
   }
 });
 
-const PORT = process.env.PORT || 3000;
+// Root health
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'gps-proxy',
+    env: { defaultDevice: DEFAULT_DEVICE, hasToken: Boolean(GPS51_TOKEN), gps51Base: GPS51_BASE }
+  });
+});
+
 app.listen(PORT, () => {
-  console.log(`GPS proxy running on http://localhost:${PORT}`);
+  log(`GPS proxy running on port ${PORT}`);
 });
