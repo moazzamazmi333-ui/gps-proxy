@@ -2,7 +2,6 @@
   "name": "gps-proxy",
   "type": "module",
   "version": "1.0.0",
-  "main": "gps-proxy.js",
   "scripts": {
     "start": "node gps-proxy.js"
   },
@@ -11,4 +10,3 @@
     "node-fetch": "^3.3.2"
   }
 }
-
