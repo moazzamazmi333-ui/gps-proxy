@@ -29,7 +29,7 @@ app.get("/api/location", async (req, res) => {
     }
 
     const url =
-  `${GPS51_URL}/StandardApiAction_getDeviceStatus.action` +
+  `${GPS51_URL}/StandardApiAction_getLastPosition.action` +
   `?deviceId=${deviceid}&token=${GPS51_TOKEN}`;
 
 
@@ -60,4 +60,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("GPS proxy running on port", PORT);
 });
+
 
