@@ -1,22 +1,6 @@
-import express from "express";
-import fetch from "node-fetch";
-
-const app = express();
-
-/* ===============================
-   BASIC CHECK ROUTE
-================================ */
-app.get("/", (req, res) => {
-  res.send("GPS51 Proxy Running");
-});
-
-/* ===============================
-   GPS51 TOKEN LOCATION API
-================================ */
 app.get("/api/location", async (req, res) => {
   try {
     const deviceid = req.query.deviceid;
-
     if (!deviceid) {
       return res.status(400).json({ error: "deviceid required" });
     }
@@ -28,37 +12,38 @@ app.get("/api/location", async (req, res) => {
       return res.status(500).json({ error: "GPS51 env missing" });
     }
 
+    // 🔥 EXACT API USED BY gps51.com (from your Network tab)
     const url =
-  `${GPS51_URL}/StandardApiAction_getLastPosition.action` +
-  `?deviceId=${deviceid}&token=${GPS51_TOKEN}`;
+      `${GPS51_URL}/StandardApiAction_poibatch.action` +
+      `?token=${GPS51_TOKEN}`;
 
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        points: [
+          { deviceid: deviceid }
+        ]
+      })
+    });
 
-    const r = await fetch(url);
     const text = await r.text();
 
     let json;
     try {
       json = JSON.parse(text);
-    } catch (e) {
+    } catch {
       return res.status(500).json({
-        error: "GPS51 returned non-JSON",
-        preview: text.slice(0, 150)
+        error: "Still non-JSON from GPS51",
+        preview: text.slice(0, 200)
       });
     }
 
     res.json(json);
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
-
-/* ===============================
-   START SERVER (RENDER SAFE)
-================================ */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("GPS proxy running on port", PORT);
-});
-
-
