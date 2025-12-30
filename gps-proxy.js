@@ -1,24 +1,3 @@
-// gps-proxy.js
-import express from "express";
-import fetch from "node-fetch";
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-/* ===== CORS (VERY IMPORTANT) ===== */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  next();
-});
-
-/* ===== HEALTH CHECK ===== */
-app.get("/", (req, res) => {
-  res.json({ status: "GPS Proxy running" });
-});
-
-/* ===== MAIN GPS ENDPOINT ===== */
 app.get("/api/location", async (req, res) => {
   try {
     const deviceid = req.query.deviceid;
@@ -26,47 +5,47 @@ app.get("/api/location", async (req, res) => {
       return res.status(400).json({ error: "deviceid required" });
     }
 
-    /* 🔐 GPS51 ENV VARIABLES (already in Render) */
-    const GPS51_URL = process.env.GPS51_URL; // example: http://120.77.xx.xx
+    const GPS51_URL = process.env.GPS51_URL;
     const GPS51_USER = process.env.GPS51_USER;
     const GPS51_PASS = process.env.GPS51_PASS;
 
-    if (!GPS51_URL || !GPS51_USER || !GPS51_PASS) {
-      return res.status(500).json({ error: "GPS51 env missing" });
-    }
-
-    /* ===== LOGIN ===== */
+    /* 1️⃣ LOGIN (HTML OK) */
     const loginUrl =
       `${GPS51_URL}/StandardApiAction_login.action` +
       `?account=${GPS51_USER}&password=${GPS51_PASS}`;
 
-    const loginRes = await fetch(loginUrl);
-    const loginJson = await loginRes.json();
+    const loginRes = await fetch(loginUrl, { redirect: "manual" });
 
-    if (loginJson.result !== 0) {
-      return res.status(401).json({ error: "GPS51 login failed", loginJson });
+    const cookie = loginRes.headers.get("set-cookie");
+    if (!cookie) {
+      return res.status(401).json({ error: "GPS51 login failed (no cookie)" });
     }
 
-    /* ===== FETCH LOCATION ===== */
-    const locUrl =
-      `${GPS51_URL}/StandardApiAction_getDeviceStatus.action` +
-      `?deviceId=${deviceid}`;
+    /* 2️⃣ FETCH DEVICE STATUS USING COOKIE */
+    const dataUrl =
+      `${GPS51_URL}/StandardApiAction_getDeviceStatus.action?deviceId=${deviceid}`;
 
-    const locRes = await fetch(locUrl);
-    const locJson = await locRes.json();
+    const dataRes = await fetch(dataUrl, {
+      headers: { cookie }
+    });
 
-    /* 🔥 IMPORTANT LOG */
-    console.log("GPS51 DATA:", JSON.stringify(locJson));
+    const text = await dataRes.text();
 
-    return res.json(locJson);
+    /* 3️⃣ CONVERT TO JSON SAFELY */
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      return res.status(500).json({
+        error: "GPS51 returned non-JSON",
+        preview: text.slice(0, 120)
+      });
+    }
+
+    return res.json(json);
 
   } catch (err) {
-    console.error("GPS proxy error:", err);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
-});
-
-/* ===== START SERVER ===== */
-app.listen(PORT, () => {
-  console.log("GPS proxy running on port", PORT);
 });
