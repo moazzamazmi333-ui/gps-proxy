@@ -1,57 +1,75 @@
 import express from "express";
 import fetch from "node-fetch";
+import cors from "cors";
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 
-/* ===== Root check ===== */
-app.get("/", (req, res) => {
-  res.send("GPS51 Proxy Running");
-});
+// =====================
+// ENV VARIABLES (Render)
+// =====================
+const GPS51_TOKEN = process.env.GPS51_TOKEN;
+const PORT = process.env.PORT || 3000;
 
-/* ===== Location API ===== */
-app.get("/api/location", async (req, res) => {
+if (!GPS51_TOKEN) {
+  console.error("❌ GPS51_TOKEN missing");
+}
+
+// =====================
+// LAST POSITION API
+// =====================
+app.post("/api/lastposition", async (req, res) => {
   try {
-    const deviceid = req.query.deviceid;
-    if (!deviceid) {
-      return res.status(400).json({ error: "deviceid required" });
+    const { deviceids } = req.body;
+
+    if (!deviceids || !Array.isArray(deviceids)) {
+      return res.status(400).json({ error: "deviceids array required" });
     }
 
-    const GPS51_URL = process.env.GPS51_URL;
-    const GPS51_TOKEN = process.env.GPS51_TOKEN;
+    const gpsRes = await fetch(
+      "https://api.gps51.com/webapi?action=lastposition",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          token: GPS51_TOKEN,
+          deviceids,
+          extend: "self"
+        })
+      }
+    );
 
-    if (!GPS51_URL || !GPS51_TOKEN) {
-      return res.status(500).json({ error: "GPS51 env missing" });
-    }
+    const text = await gpsRes.text();
 
-    const url =
-      `${GPS51_URL}/StandardApiAction_poibatch.action?token=${GPS51_TOKEN}`;
-
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        points: [{ deviceid }]
-      })
-    });
-
-    const text = await r.text();
-
-    try {
-      res.json(JSON.parse(text));
-    } catch {
-      res.status(500).json({
+    // GPS51 sometimes returns HTML on error
+    if (text.startsWith("<")) {
+      return res.status(500).json({
         error: "GPS51 returned non-JSON",
         preview: text.slice(0, 200)
       });
     }
 
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const data = JSON.parse(text);
+    res.json(data);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-/* ===== Start server ===== */
-const PORT = process.env.PORT || 3000;
+// =====================
+// HEALTH CHECK
+// =====================
+app.get("/", (req, res) => {
+  res.send("GPS51 Proxy Running ✅");
+});
+
+// =====================
+// START SERVER
+// =====================
 app.listen(PORT, () => {
-  console.log("GPS proxy running on port", PORT);
+  console.log(`🚀 GPS proxy running on port ${PORT}`);
 });
